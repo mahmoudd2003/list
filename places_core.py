@@ -266,6 +266,25 @@ def build_query(category_key: str, city_key: str) -> str:
     return f"أفضل مطاعم {cat_ar} في {city_ar}"
 
 def make_items_from_places(api_key: str, places: List[Dict], min_reviews: int = 200) -> List[Dict]:
+    def safe_int(v, default=0):
+        try:
+            return int(v)
+        except Exception:
+            # أحيانًا يأتي كـ "1,234" أو None
+            try:
+                return int(str(v).replace(",", ""))
+            except Exception:
+                return default
+
+    def safe_float(v, default=None):
+        try:
+            return float(v)
+        except Exception:
+            try:
+                return float(str(v).replace(",", ""))
+            except Exception:
+                return default
+
     items: List[Dict] = []
     for p in places:
         pid = p.get("id") or p.get("placeId")
@@ -279,8 +298,11 @@ def make_items_from_places(api_key: str, places: List[Dict], min_reviews: int = 
         website = det.get("websiteUri", "")
         maps_uri = det.get("googleMapsUri", "")
         price_level = det.get("priceLevel", None)
-        rating = det.get("rating", None)
-        rating_count = det.get("userRatingCount", None)
+
+        # تحويلات آمنة
+        rating = safe_float(det.get("rating"))
+        rating_count = safe_int(det.get("userRatingCount"))
+
         types = det.get("types", []) or []
 
         ch = det.get("currentOpeningHours", {}) or {}
@@ -293,7 +315,7 @@ def make_items_from_places(api_key: str, places: List[Dict], min_reviews: int = 
             "name": name,
             "address": address or "—",
             "phone": phone or "—",
-            "price_range": map_price_level_to_range(price_level),
+            "price_range": map_price_level_to_range(price_level if isinstance(price_level, int) else None),
             "website": website,
             "maps_uri": maps_uri,
             "today_hours": today_hours,
@@ -308,7 +330,13 @@ def make_items_from_places(api_key: str, places: List[Dict], min_reviews: int = 
         }
         items.append(item)
 
-    # Filter & sort
-    items = [it for it in items if (it.get("rating_count") or 0) >= min_reviews]
-    items.sort(key=lambda x: ((x.get("rating") or 0), (x.get("rating_count") or 0)), reverse=True)
+    # فلترة وترتيب بالاعتماد على أرقام مضمونة
+    items = [it for it in items if (it.get("rating_count") or 0) >= int(min_reviews)]
+    items.sort(
+        key=lambda x: (
+            x.get("rating") if isinstance(x.get("rating"), (int, float)) else -1,
+            x.get("rating_count") if isinstance(x.get("rating_count"), int) else -1
+        ),
+        reverse=True
+    )
     return items
