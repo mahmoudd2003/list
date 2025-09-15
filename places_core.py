@@ -26,27 +26,53 @@ CITY_PRESETS = {
 # Helpers
 # -----------------------------
 def map_price_level_to_range(level: Optional[int]) -> str:
-    if level is None or level == 0:
-        return "غير محدد"
-    if level == 1:
-        return "25 – 50 ر.س"
-    if level == 2:
-        return "50 – 75 ر.س"
-    if level == 3:
-        return "75 – 120 ر.س"
-    if level >= 4:
-        return "120+ ر.س"
+    if level is None or level == 0:  return "غير محدد"
+    if level == 1:                   return "25 – 50 ر.س"
+    if level == 2:                   return "50 – 75 ر.س"
+    if level == 3:                   return "75 – 120 ر.س"
+    if level >= 4:                   return "120+ ر.س"
     return "غير محدد"
+
+def coerce_price_level(v) -> Optional[int]:
+    """Places New قد يعود بـ enum مثل PRICE_LEVEL_MODERATE؛ نحوله لأرقام 1..4."""
+    if v is None: return None
+    if isinstance(v, int): return v
+    s = str(v).upper()
+    mapping = {
+        "PRICE_LEVEL_INEXPENSIVE": 1,
+        "PRICE_LEVEL_MODERATE": 2,
+        "PRICE_LEVEL_EXPENSIVE": 3,
+        "PRICE_LEVEL_VERY_EXPENSIVE": 4,
+        "PRICE_LEVEL_UNSPECIFIED": None,
+    }
+    return mapping.get(s, None)
+
+def safe_int(v, default=0):
+    try: return int(v)
+    except Exception:
+        try: return int(str(v).replace(",", "").strip())
+        except Exception: return default
+
+def safe_float(v, default=None):
+    try: return float(v)
+    except Exception:
+        try: return float(str(v).replace(",", "").strip())
+        except Exception: return default
+
+def normalize_time_string(s: str) -> str:
+    if ":" in s:
+        times = s.split(":", 1)[1].strip()
+    else:
+        times = s.strip()
+    return times.replace("AM","ص").replace("PM","م").replace("am","ص").replace("pm","م").replace("-", "–")
 
 def extract_thursday_times(weekday_desc: List[str]) -> str:
     """Return Thursday hours only (without the word Thursday)."""
-    if not weekday_desc:
-        return "—"
+    if not weekday_desc: return "—"
     for raw in weekday_desc:
         if "Thursday" in raw or "الخميس" in raw:
-            return raw.split(":", 1)[1].strip() if ":" in raw else raw.strip()
-    # fallback: first line
-    return weekday_desc[0].split(":", 1)[1].strip() if ":" in weekday_desc[0] else weekday_desc[0].strip()
+            return normalize_time_string(raw)
+    return normalize_time_string(weekday_desc[0])
 
 # -----------------------------
 # HTML builders
@@ -101,16 +127,13 @@ PLACES_DETAILS_URL_TMPL = "https://places.googleapis.com/v1/places/{place_id}"
 
 def places_search_text(api_key: str, query: str, city_key: str, max_results: int = 15):
     preset = CITY_PRESETS.get(city_key.lower())
-    if not preset:
-        raise ValueError(f"Unsupported city '{city_key}'")
+    if not preset: raise ValueError(f"Unsupported city '{city_key}'")
     payload = {
         "textQuery": query,
         "languageCode": "ar",
         "regionCode": preset["regionCode"],
         "maxResultCount": min(max_results, 20),
-        "locationBias": {
-            "circle": {"center": {"latitude": preset["lat"], "longitude": preset["lng"]}, "radius": preset["radius"]}
-        },
+        "locationBias": {"circle": {"center": {"latitude": preset["lat"], "longitude": preset["lng"]}, "radius": preset["radius"]}},
         "includedType": "restaurant",
     }
     headers = {
@@ -152,29 +175,41 @@ def create_or_update_draft_post(base_url, user, app_password, title, content_htm
 # Orchestration
 # -----------------------------
 def make_items_from_places(api_key: str, places: List[Dict], min_reviews: int = 200, region_code: Optional[str] = None):
-    def safe_int(v): 
-        try: return int(str(v).replace(",",""))
-        except: return 0
-    items = []
+    items: List[Dict] = []
     for p in places:
         pid = p.get("id") or p.get("placeId")
         if not pid: continue
+
         det = place_details(api_key, pid, region_code=region_code)
-        weekday_desc = det.get("regularOpeningHours",{}).get("weekdayDescriptions",[]) or []
+
+        price_level = coerce_price_level(det.get("priceLevel"))
+        rating = safe_float(det.get("rating"))
+        rating_count = safe_int(det.get("userRatingCount"))
+
+        ch = det.get("regularOpeningHours", {}) or det.get("currentOpeningHours", {}) or {}
+        weekday_desc = ch.get("weekdayDescriptions", []) or []
         thursday_times = extract_thursday_times(weekday_desc)
+
         items.append({
-            "name": det.get("displayName",{}).get("text",""),
-            "address": det.get("formattedAddress",""),
-            "phone": det.get("nationalPhoneNumber",""),
-            "website": det.get("websiteUri",""),
-            "maps_uri": det.get("googleMapsUri",""),
-            "price_range": map_price_level_to_range(det.get("priceLevel")),
+            "name": det.get("displayName", {}).get("text", ""),
+            "address": det.get("formattedAddress", ""),
+            "phone": det.get("nationalPhoneNumber", ""),
+            "website": det.get("websiteUri", ""),
+            "maps_uri": det.get("googleMapsUri", ""),
+            "price_range": map_price_level_to_range(price_level),
             "thursday_hours": thursday_times,
             "family_friendly": "نعم (تقديري)",
             "signature_dish": "",
             "crowd_note": "8:00 م – 11:00 م (تقديري)",
-            "rating_count": safe_int(det.get("userRatingCount")),
+            "rating": rating,
+            "rating_count": rating_count,
         })
-    items = [it for it in items if it["rating_count"] >= min_reviews]
-    items.sort(key=lambda x: x["rating_count"], reverse=True)
+
+    # فلترة وترتيب بقيم رقمية مؤكدة
+    min_rev = safe_int(min_reviews)
+    items = [it for it in items if safe_int(it.get("rating_count")) >= min_rev]
+    items.sort(
+        key=lambda x: (safe_float(x.get("rating"), -1.0), safe_int(x.get("rating_count"), -1)),
+        reverse=True
+    )
     return items
